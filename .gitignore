@@ -1,0 +1,26 @@
+# Environment & secrets
+backend/.env
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (uploaded docs, vector DB, exports)
+backend/data/uploads/
+backend/data/chroma_db/
+backend/data/exports/
+backend/data/*.json
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# AWS
+.aws/
+
+# OS
+.DS_Store
+Thumbs.db
