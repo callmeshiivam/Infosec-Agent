@@ -115,16 +115,3 @@ async def download_document(filename: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"Document '{filename}' not found.")
     return FileResponse(path=str(file_path), filename=filename, media_type="application/octet-stream")
-
-
-@router.delete("/delete_all")
-async def delete_all_documents():
-    """Delete all documents from the knowledge base and their embeddings."""
-    deleted_files = 0
-    deleted_chunks = 0
-    for f in UPLOADS_DIR.iterdir():
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXTENSIONS:
-            deleted_chunks += rag_engine.delete_document(f.name)
-            f.unlink()
-            deleted_files += 1
-    return {"message": f"Deleted {deleted_files} documents and {deleted_chunks} chunks.", "deleted_files": deleted_files, "deleted_chunks": deleted_chunks}

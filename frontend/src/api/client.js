@@ -68,15 +68,6 @@ const api = {
     return res.json();
   },
 
-  async summarizeDocument(filename) {
-    const res = await fetch(`${API_BASE}/documents/summarize/${encodeURIComponent(filename)}`);
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || 'Summarization failed');
-    }
-    return res.json();
-  },
-
   // ===== Questionnaire =====
 
   async chatQuery(question, history = [], topK = 5) {
