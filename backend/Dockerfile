@@ -15,4 +15,5 @@ RUN mkdir -p data/uploads data/chroma_db data/exports
 
 EXPOSE 8000
 
+# Startup: create data dirs then run
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
