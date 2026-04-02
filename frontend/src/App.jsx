@@ -93,17 +93,12 @@ function App() {
           {health && health.status === 'healthy' && (
             <div className="sidebar-info-row model-row">
               <span className="model-dot"></span>
-              <span className="info-label">{health.provider?.toUpperCase()} · {formatTokens(health.usage?.tokens_today || 0)} tokens</span>
+              <span className="info-label">{(health.usage?.last_provider || health.provider)?.toUpperCase()} · {formatTokens(health.usage?.tokens_today || 0)} tokens</span>
             </div>
           )}
-          {health?.usage?.cost_usd > 0 && (
+          {health?.status === 'healthy' && (
             <div className="sidebar-info-row">
-              <span className="info-label">💰 ${health.usage.cost_usd.toFixed(4)} spent</span>
-            </div>
-          )}
-          {health?.usage?.cost_usd === 0 && health?.status === 'healthy' && (
-            <div className="sidebar-info-row">
-              <span className="info-label" style={{ color: 'var(--success)' }}>✓ Free tier</span>
+              <span className="info-label">💰 ${(health.usage?.cost_usd || 0) < 0.01 ? (health.usage?.cost_usd || 0).toFixed(6) : (health.usage?.cost_usd || 0).toFixed(4)} spent</span>
             </div>
           )}
           <button className="theme-toggle-btn" onClick={() => setTheme(p => p === 'dark' ? 'light' : 'dark')} aria-label="Toggle theme">

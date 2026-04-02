@@ -92,6 +92,43 @@ def get_provider_info():
     return result
 
 
+def _auto_refresh_sso():
+    """Attempt to refresh AWS SSO credentials automatically."""
+    import subprocess, re
+    aws_cmd = r"C:\Program Files\Amazon\AWSCLIV2\aws.exe"
+    env_file = Path(__file__).parent.parent / ".env"
+
+    # Login via SSO (opens browser)
+    subprocess.run([aws_cmd, "sso", "login", "--profile", "locobuzz-bedrock"], check=True, timeout=120)
+
+    # Export fresh credentials
+    result = subprocess.run(
+        [aws_cmd, "configure", "export-credentials", "--profile", "locobuzz-bedrock", "--format", "env"],
+        capture_output=True, text=True, check=True, timeout=30
+    )
+
+    creds = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, _, val = line.partition("=")
+            creds[key.replace("export ", "").strip()] = val.strip()
+
+    # Update .env
+    content = env_file.read_text()
+    for key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]:
+        val = creds.get(key, "")
+        if not val:
+            continue
+        pattern = rf"^{key}=.*$"
+        replacement = f"{key}={val}"
+        if re.search(pattern, content, re.MULTILINE):
+            content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+        else:
+            content += f"\n{key}={val}"
+    env_file.write_text(content)
+    print("[RAG] SSO credentials refreshed successfully")
+
+
 def _create_llm(provider: str):
     """Create an LLM instance for a specific provider."""
     cfg = PROVIDERS.get(provider, {})
@@ -101,12 +138,34 @@ def _create_llm(provider: str):
     if provider == "bedrock":
         import boto3
         from langchain_aws import ChatBedrock
+        # Try with current creds, auto-refresh if expired
         session = boto3.Session(
             aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
             region_name=os.getenv("AWS_REGION", "ap-south-1"),
         )
+        try:
+            # Quick test to see if creds are valid
+            sts = session.client("sts")
+            sts.get_caller_identity()
+        except Exception:
+            # Creds expired — try auto-refresh via SSO
+            print("[RAG] Bedrock credentials expired. Attempting SSO refresh...")
+            try:
+                _auto_refresh_sso()
+                # Reload env after refresh
+                from dotenv import load_dotenv
+                load_dotenv(override=True)
+                session = boto3.Session(
+                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                    aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+                    region_name=os.getenv("AWS_REGION", "ap-south-1"),
+                )
+            except Exception as e:
+                print(f"[RAG] SSO auto-refresh failed: {e}")
+                raise Exception("Bedrock credentials expired. Run: python backend/refresh_aws.py")
         return ChatBedrock(
             model_id=model,
             client=session.client("bedrock-runtime"),
@@ -399,7 +458,14 @@ def query_knowledge_base(question: str, history: List[Dict[str, str]] = None, to
     # Track usage
     tokens = 0
     if hasattr(response, "response_metadata"):
-        tokens = response.response_metadata.get("token_usage", {}).get("total_tokens", 0)
+        meta = response.response_metadata
+        # Bedrock format
+        usage_data = meta.get("usage", {})
+        tokens = usage_data.get("totalTokens", 0) or (usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0))
+        # OpenAI/Groq format
+        if tokens == 0:
+            usage_data = meta.get("token_usage", {})
+            tokens = usage_data.get("total_tokens", 0)
     if tokens == 0:
         tokens = (len(SYSTEM_PROMPT) + len(user_prompt) + len(answer)) // 4
 
@@ -407,7 +473,9 @@ def query_knowledge_base(question: str, history: List[Dict[str, str]] = None, to
         _usage["requests"] += 1
         _usage["last_provider"] = provider_used
         _usage["tokens"] += tokens
-        _usage["cost"] += (tokens / 1_000_000) * COST_PER_1M_TOKENS.get(provider_used, 0)
+        cost_increment = (tokens / 1_000_000) * COST_PER_1M_TOKENS.get(provider_used, 0)
+        _usage["cost"] += cost_increment
+        print(f"[RAG] Provider: {provider_used}, Tokens: {tokens}, Cost increment: ${cost_increment:.8f}, Total cost: ${_usage['cost']:.8f}")
 
     confidence = "high" if len(relevant_docs) >= 3 else ("medium" if len(relevant_docs) >= 1 else "low")
     return {"answer": answer, "sources": sources, "confidence": confidence, "provider": provider_used}
