@@ -18,9 +18,11 @@ services:
       - key: CEREBRAS_API_KEY
         sync: false
       - key: EMBEDDING_PROVIDER
-        value: google
-      - key: GOOGLE_EMBEDDING_MODEL
-        value: models/gemini-embedding-001
+        value: voyage
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: VOYAGE_EMBEDDING_MODEL
+        value: voyage-3-lite
       - key: CORS_ORIGINS
         sync: false
     disk:

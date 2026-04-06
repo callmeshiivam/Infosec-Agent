@@ -190,7 +190,10 @@ def _get_embeddings():
     if _embeddings is not None:
         return _embeddings
     provider = os.getenv("EMBEDDING_PROVIDER", "local")
-    if provider == "openai":
+    if provider == "voyage":
+        from langchain_community.embeddings import VoyageEmbeddings
+        _embeddings = VoyageEmbeddings(voyage_api_key=os.getenv("VOYAGE_API_KEY"), model=os.getenv("VOYAGE_EMBEDDING_MODEL", "voyage-3-lite"))
+    elif provider == "openai":
         from langchain_openai import OpenAIEmbeddings
         _embeddings = OpenAIEmbeddings(model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"), openai_api_key=os.getenv("OPENAI_API_KEY"))
     elif provider == "local":
