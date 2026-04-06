@@ -1,23 +1,23 @@
 """
 RAG Engine Service
-Handles document embedding, vector storage (ChromaDB), and LLM-powered question answering.
+Handles document embedding, vector storage (Pinecone cloud), and LLM-powered question answering.
 Supports automatic fallback across multiple free-tier LLM providers.
 """
 import os
 import time
 import threading
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
 from langchain.schema import Document, HumanMessage, SystemMessage
 
-_vectorstore = None
+_pinecone_index = None
 _embeddings = None
 _usage = {"requests": 0, "tokens": 0, "cost": 0.0, "last_provider": None}
 _usage_lock = threading.Lock()
 
-CHROMA_DIR = str(Path(__file__).parent.parent / "data" / "chroma_db")
+# Cost per 1M tokens (input+output blended average) — USD
 
 # Cost per 1M tokens (input+output blended average) — USD
 COST_PER_1M_TOKENS = {
@@ -27,7 +27,6 @@ COST_PER_1M_TOKENS = {
     "cerebras": 0.0,    # Free tier
     "openai": 7.50,     # GPT-4o: $2.50 input + $10 output, blended ~$7.50
 }
-COLLECTION_NAME = "infosec_knowledge"
 
 # Provider configs: name -> {env_key, model_env, default_model, free_rpd, free_tpm}
 PROVIDERS = {
@@ -205,62 +204,103 @@ def _get_embeddings():
     return _embeddings
 
 
-def _get_vectorstore():
-    global _vectorstore
-    if _vectorstore is not None:
-        return _vectorstore
-    _vectorstore = Chroma(collection_name=COLLECTION_NAME, embedding_function=_get_embeddings(), persist_directory=CHROMA_DIR)
-    return _vectorstore
+def _get_pinecone():
+    """Get or create Pinecone index connection."""
+    global _pinecone_index
+    if _pinecone_index is not None:
+        return _pinecone_index
+    from pinecone import Pinecone
+    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+    _pinecone_index = pc.Index(os.getenv("PINECONE_INDEX", "infosec-kb"))
+    return _pinecone_index
+
+
+def _embed_texts(texts: List[str]) -> List[List[float]]:
+    """Embed texts using the configured embedding provider."""
+    embeddings = _get_embeddings()
+    return embeddings.embed_documents(texts)
+
+
+def _embed_query(text: str) -> List[float]:
+    """Embed a single query."""
+    embeddings = _get_embeddings()
+    return embeddings.embed_query(text)
 
 
 def reset_instances():
-    global _vectorstore, _embeddings
-    _vectorstore = None
+    global _pinecone_index, _embeddings
+    _pinecone_index = None
     _embeddings = None
 
 
 def ingest_document(text: str, metadata: Dict) -> int:
-    """Chunk text and store embeddings in ChromaDB."""
+    """Chunk text and store embeddings in Pinecone."""
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", ". ", " ", ""])
     chunks = splitter.split_text(text)
-    documents = [Document(page_content=chunk, metadata={**metadata, "chunk_index": i}) for i, chunk in enumerate(chunks)]
-    vectorstore = _get_vectorstore()
+    if not chunks:
+        return 0
 
-    if os.getenv("EMBEDDING_PROVIDER", "local") == "local":
-        vectorstore.add_documents(documents)
-        return len(documents)
+    index = _get_pinecone()
+    filename = metadata.get("filename", "unknown")
 
-    for i in range(0, len(documents), 20):
-        batch = documents[i:i + 20]
+    # Embed in batches
+    batch_size = 20
+    total = 0
+    for i in range(0, len(chunks), batch_size):
+        batch_chunks = chunks[i:i + batch_size]
+        vectors_data = _embed_texts(batch_chunks)
+
+        upserts = []
+        for j, (chunk, vec) in enumerate(zip(batch_chunks, vectors_data)):
+            chunk_id = hashlib.md5(f"{filename}_{i+j}_{chunk[:50]}".encode()).hexdigest()
+            upserts.append({
+                "id": chunk_id,
+                "values": vec,
+                "metadata": {"filename": filename, "chunk_index": i + j, "text": chunk[:1000]},
+            })
+
         for attempt in range(3):
             try:
-                vectorstore.add_documents(batch)
+                index.upsert(vectors=upserts)
                 break
             except Exception as e:
-                if "429" in str(e) and attempt < 2:
-                    time.sleep(10)
+                if attempt < 2:
+                    time.sleep(3)
                     continue
                 raise
-        if i + 20 < len(documents):
-            time.sleep(3)
-    return len(documents)
+
+        total += len(batch_chunks)
+        if i + batch_size < len(chunks):
+            time.sleep(1)
+
+    return total
 
 
 def delete_document(filename: str) -> int:
-    collection = _get_vectorstore()._collection
-    results = collection.get(where={"filename": filename})
-    if results and results["ids"]:
-        collection.delete(ids=results["ids"])
-        return len(results["ids"])
+    """Delete all chunks for a document from Pinecone."""
+    index = _get_pinecone()
+    # Pinecone serverless doesn't support delete by metadata filter directly
+    # We need to query for matching IDs first
+    try:
+        query_vec = _embed_query(f"document {filename}")
+        results = index.query(vector=query_vec, top_k=100, filter={"filename": filename}, include_metadata=False)
+        ids = [m["id"] for m in results["matches"]]
+        if ids:
+            index.delete(ids=ids)
+            return len(ids)
+    except Exception as e:
+        print(f"[RAG] Delete error: {e}")
     return 0
 
 
 def has_document_chunks(filename: str) -> bool:
-    """Check if any chunks for this filename exist in ChromaDB."""
-    collection = _get_vectorstore()._collection
-    # Using get with limit=1 is very fast
-    results = collection.get(where={"filename": filename}, limit=1)
-    return bool(results and results["ids"])
+    """Check if any chunks for this filename exist in Pinecone."""
+    try:
+        query_vec = _embed_query(f"document {filename}")
+        results = _get_pinecone().query(vector=query_vec, top_k=1, filter={"filename": filename}, include_metadata=False)
+        return len(results.get("matches", [])) > 0
+    except:
+        return False
 
 
 def _call_llm_with_fallback(messages) -> tuple:
@@ -388,7 +428,13 @@ def query_knowledge_base(question: str, history: List[Dict[str, str]] = None, to
 
     # Retrieve more chunks than needed, then deduplicate by filename for diversity
     retrieval_k = max(top_k * 2, 10)
-    all_docs = _get_vectorstore().as_retriever(search_kwargs={"k": retrieval_k}).invoke(expanded_query)
+    query_vec = _embed_query(expanded_query)
+    pinecone_results = _get_pinecone().query(vector=query_vec, top_k=retrieval_k, include_metadata=True)
+
+    all_docs = []
+    for match in pinecone_results.get("matches", []):
+        meta = match.get("metadata", {})
+        all_docs.append(Document(page_content=meta.get("text", ""), metadata={"filename": meta.get("filename", "Unknown"), "score": match.get("score", 0)}))
 
     # Deduplicate: keep best chunk per file, then fill remaining slots
     seen_files = {}
@@ -486,6 +532,7 @@ def query_knowledge_base(question: str, history: List[Dict[str, str]] = None, to
 
 def get_collection_stats() -> Dict:
     try:
-        return {"total_chunks": _get_vectorstore()._collection.count(), "status": "ready"}
+        stats = _get_pinecone().describe_index_stats()
+        return {"total_chunks": stats.get("total_vector_count", 0), "status": "ready"}
     except Exception as e:
         return {"total_chunks": 0, "status": f"error: {str(e)}"}

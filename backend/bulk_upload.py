@@ -29,8 +29,7 @@ def main():
         sys.exit(1)
 
     files = [f for f in sorted(LOCAL_UPLOADS.iterdir()) if f.is_file() and f.suffix.lower() in ALLOWED]
-    print(f"Found {len(files)} files to upload to {PROD_URL}")
-    print()
+    print(f"Found {len(files)} local files")
 
     # Wake up the Render service first (free tier sleeps)
     print("Waking up production server...")
@@ -41,9 +40,22 @@ def main():
         print("Server may be starting up. Waiting 30s...")
         time.sleep(30)
 
+    # Get existing docs to skip
+    existing = set()
+    try:
+        docs = requests.get(f"{PROD_URL}/documents/list", timeout=30).json()
+        existing = {d["filename"] for d in docs}
+        print(f"Already uploaded: {len(existing)} files")
+    except:
+        print("Could not fetch existing docs — uploading all")
+
+    to_upload = [f for f in files if f.name not in existing]
+    print(f"Uploading: {len(to_upload)} new files (skipping {len(files) - len(to_upload)})")
+    print()
+
     success, failed = 0, []
-    for i, f in enumerate(files):
-        print(f"[{i+1}/{len(files)}] Uploading {f.name}...", end=" ", flush=True)
+    for i, f in enumerate(to_upload):
+        print(f"[{i+1}/{len(to_upload)}] Uploading {f.name}...", end=" ", flush=True)
         try:
             resp = upload_file(f)
             if resp.status_code == 200:
@@ -57,7 +69,7 @@ def main():
         except Exception as e:
             print(f"ERROR — {str(e)[:80]}")
             failed.append((f.name, str(e)[:80]))
-        time.sleep(1)  # Be gentle with rate limits
+        time.sleep(1)
 
     print()
     print(f"Done: {success}/{len(files)} uploaded successfully")

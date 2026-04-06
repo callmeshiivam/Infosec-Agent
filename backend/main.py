@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import documents, questionnaire
 
 BASE_DIR = Path(__file__).parent
-for d in ["uploads", "chroma_db", "exports"]:
+for d in ["uploads", "exports"]:
     (BASE_DIR / "data" / d).mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
