@@ -30,7 +30,6 @@ COST_PER_1M_TOKENS = {
 
 # Provider configs: name -> {env_key, model_env, default_model, free_rpd, free_tpm}
 PROVIDERS = {
-    "bedrock":  {"key_env": "AWS_ACCESS_KEY_ID",  "model_env": "BEDROCK_MODEL",  "default": "apac.amazon.nova-lite-v1:0", "rpd": 10000, "tpm": 100000},
     "groq":     {"key_env": "GROQ_API_KEY",     "model_env": "GROQ_MODEL",     "default": "meta-llama/llama-3.3-70b-versatile", "rpd": 1000,  "tpm": 30000},
     "google":   {"key_env": "GOOGLE_API_KEY",    "model_env": "GOOGLE_MODEL",   "default": "gemini-2.0-flash",                          "rpd": 250,   "tpm": 250000},
     "cerebras": {"key_env": "CEREBRAS_API_KEY",  "model_env": "CEREBRAS_MODEL", "default": "llama3.1-8b",                              "rpd": 5000,  "tpm": 60000},
@@ -67,8 +66,6 @@ def get_fallback_chain():
     chain.insert(0, primary)
     # Filter: bedrock uses AWS credential chain (always available if configured), others need explicit keys
     def has_credentials(p):
-        if p == "bedrock":
-            return bool(os.getenv("AWS_ACCESS_KEY_ID", "").strip() or os.getenv("AWS_PROFILE", "").strip() or True)  # boto3 auto-discovers
         return bool(os.getenv(PROVIDERS.get(p, {}).get("key_env", ""), "").strip())
     return [p for p in chain if has_credentials(p)]
 
@@ -91,86 +88,13 @@ def get_provider_info():
     return result
 
 
-def _auto_refresh_sso():
-    """Attempt to refresh AWS SSO credentials automatically."""
-    import subprocess, re
-    aws_cmd = r"C:\Program Files\Amazon\AWSCLIV2\aws.exe"
-    env_file = Path(__file__).parent.parent / ".env"
-
-    # Login via SSO (opens browser)
-    subprocess.run([aws_cmd, "sso", "login", "--profile", "locobuzz-bedrock"], check=True, timeout=120)
-
-    # Export fresh credentials
-    result = subprocess.run(
-        [aws_cmd, "configure", "export-credentials", "--profile", "locobuzz-bedrock", "--format", "env"],
-        capture_output=True, text=True, check=True, timeout=30
-    )
-
-    creds = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, _, val = line.partition("=")
-            creds[key.replace("export ", "").strip()] = val.strip()
-
-    # Update .env
-    content = env_file.read_text()
-    for key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]:
-        val = creds.get(key, "")
-        if not val:
-            continue
-        pattern = rf"^{key}=.*$"
-        replacement = f"{key}={val}"
-        if re.search(pattern, content, re.MULTILINE):
-            content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
-        else:
-            content += f"\n{key}={val}"
-    env_file.write_text(content)
-    print("[RAG] SSO credentials refreshed successfully")
-
-
 def _create_llm(provider: str):
     """Create an LLM instance for a specific provider."""
     cfg = PROVIDERS.get(provider, {})
     model = os.getenv(cfg.get("model_env", ""), cfg.get("default", ""))
     api_key = os.getenv(cfg.get("key_env", ""), "")
 
-    if provider == "bedrock":
-        import boto3
-        from langchain_aws import ChatBedrock
-        # Try with current creds, auto-refresh if expired
-        session = boto3.Session(
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
-            region_name=os.getenv("AWS_REGION", "ap-south-1"),
-        )
-        try:
-            # Quick test to see if creds are valid
-            sts = session.client("sts")
-            sts.get_caller_identity()
-        except Exception:
-            # Creds expired — try auto-refresh via SSO
-            print("[RAG] Bedrock credentials expired. Attempting SSO refresh...")
-            try:
-                _auto_refresh_sso()
-                # Reload env after refresh
-                from dotenv import load_dotenv
-                load_dotenv(override=True)
-                session = boto3.Session(
-                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                    aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
-                    region_name=os.getenv("AWS_REGION", "ap-south-1"),
-                )
-            except Exception as e:
-                print(f"[RAG] SSO auto-refresh failed: {e}")
-                raise Exception("Bedrock credentials expired. Run: python backend/refresh_aws.py")
-        return ChatBedrock(
-            model_id=model,
-            client=session.client("bedrock-runtime"),
-            model_kwargs={"temperature": 0.1},
-        )
-    elif provider == "groq":
+    if provider == "groq":
         from langchain_groq import ChatGroq
         return ChatGroq(model_name=model, groq_api_key=api_key, temperature=0.1)
     elif provider == "cerebras":
