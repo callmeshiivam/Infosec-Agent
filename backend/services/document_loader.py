@@ -113,60 +113,38 @@ def extract_text_from_txt(file_path: str) -> str:
         return f.read()
 
 def _ocr_image_bytes(image_bytes: bytes, fmt: str, label: str = "") -> str:
-    """OCR image bytes using Bedrock Nova Lite vision."""
-    import boto3
-    session = boto3.Session(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
-        region_name=os.getenv("AWS_REGION", "ap-south-1"),
+    """OCR image bytes using Groq Vision (Llama 3.2 11B)."""
+    import base64, requests
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    media_types = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+    media_type = media_types.get(fmt, "image/jpeg")
+
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}", "Content-Type": "application/json"},
+        json={
+            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
+                {"type": "text", "text": "Extract ALL text from this image exactly as written. Preserve formatting."}
+            ]}],
+            "max_tokens": 2000,
+        },
+        timeout=60,
     )
-    client = session.client("bedrock-runtime")
-    response = client.converse(
-        modelId=os.getenv("BEDROCK_MODEL", "apac.amazon.nova-lite-v1:0"),
-        messages=[{
-            "role": "user",
-            "content": [
-                {"image": {"format": fmt, "source": {"bytes": image_bytes}}},
-                {"text": "Extract ALL text from this image exactly as written. Preserve formatting."},
-            ]
-        }]
-    )
-    return response["output"]["message"]["content"][0]["text"]
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
 
 
 def extract_text_from_image(file_path: str) -> str:
-    """Extract text from an image using AWS Bedrock Nova Lite (vision)."""
-    import boto3, base64, json
-    
+    """Extract text from an image using Groq Vision (free, no AWS needed)."""
+    import base64
+
     with open(file_path, "rb") as f:
         image_bytes = f.read()
-    
-    # Detect media type
-    suffix = Path(file_path).suffix.lower()
-    media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
-    media_type = media_types.get(suffix, "image/jpeg")
-    
-    session = boto3.Session(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
-        region_name=os.getenv("AWS_REGION", "ap-south-1"),
-    )
-    client = session.client("bedrock-runtime")
-    
-    response = client.converse(
-        modelId=os.getenv("BEDROCK_MODEL", "apac.amazon.nova-lite-v1:0"),
-        messages=[{
-            "role": "user",
-            "content": [
-                {"image": {"format": suffix.lstrip("."), "source": {"bytes": image_bytes}}},
-                {"text": "Extract ALL text from this image exactly as written. If there are diagrams, charts, or tables, describe them accurately."},
-            ]
-        }]
-    )
-    
-    text = response["output"]["message"]["content"][0]["text"]
+
+    suffix = Path(file_path).suffix.lower().lstrip(".")
+    text = _ocr_image_bytes(image_bytes, suffix, Path(file_path).name)
     return f"--- Image Content ({Path(file_path).name}) ---\n{text}"
 
 def extract_text_from_video(file_path: str) -> str:
